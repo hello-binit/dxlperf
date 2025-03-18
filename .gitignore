@@ -1,0 +1,3 @@
+.objects/
+*.out
+__pycache__/
