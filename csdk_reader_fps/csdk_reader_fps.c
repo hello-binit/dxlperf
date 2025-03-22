@@ -11,6 +11,8 @@
 
 #include <stdio.h>
 #include <time.h>
+#include <sys/resource.h>
+#include <sys/time.h>
 #include "dynamixel_sdk.h"
 
 // Protocol version
@@ -74,6 +76,12 @@ double ticks_to_world_rad_per_sec(int32_t ticks, double polarity, double gear_ra
 
 
 int main() {
+    // 0. Profile CPU usage
+    struct rusage usage_start, usage_end;
+    struct timespec real_start, real_end;
+    getrusage(RUSAGE_SELF, &usage_start);
+    clock_gettime(CLOCK_MONOTONIC, &real_start);
+
     // 1. Init four servos
     int port_num = portHandler(DEVICENAME);
     packetHandler();                                // Initialize PacketHandler Structs
@@ -262,12 +270,36 @@ int main() {
     double fps = 1.0 / dt;
     printf("\nAvg freq: %.2f\n", fps);
 
-    // 4. Shutdown
+    // 4. Close port
     closePort(port_num);
+
+    // 5. Calculate CPU usage
+    getrusage(RUSAGE_SELF, &usage_end);
+    clock_gettime(CLOCK_MONOTONIC, &real_end);
+    // Calculate total CPU time: user + system
+    double start_user_time = usage_start.ru_utime.tv_sec + usage_start.ru_utime.tv_usec / 1e6;
+    double end_user_time   = usage_end.ru_utime.tv_sec   + usage_end.ru_utime.tv_usec   / 1e6;
+    double start_sys_time  = usage_start.ru_stime.tv_sec + usage_start.ru_stime.tv_usec / 1e6;
+    double end_sys_time    = usage_end.ru_stime.tv_sec   + usage_end.ru_stime.tv_usec   / 1e6;
+
+    double total_cpu_time = (end_user_time - start_user_time) + (end_sys_time - start_sys_time);
+
+    // Real (wall-clock) time
+    double real_delta = (real_end.tv_sec - real_start.tv_sec)
+                      + (real_end.tv_nsec - real_start.tv_nsec) / 1e9;
+
+    // CPU usage % (relative to one core)
+    // if fully occupies one core on a 4-core machine, it would read ~100%, but if it occupies all 4 cores, it would read ~400%.
+    double cpu_usage_percent = (total_cpu_time / real_delta) * 100.0;
+    printf("Avg CPU: %.1f%%\n", cpu_usage_percent);
+
     return 0;
 }
 
 
-// C libdxl 3.8.1 on 3004 NUC @ Mar 5, 5pm  | Avg freq: 44.00
-// C libdxl 3.8.1 on 3004 NUC @ Mar 5, 5pm  | Avg freq: 43.90 | Avg CPU: 10% on 1 CPU
-// C libdxl 3.8.1 on 3004 NUC @ Mar 5, 5pm  | Avg freq: 44.01 | Avg CPU: 5% on 1 CPU
+// C libdxl 3.8.1 on 3004 NUC12 @ Mar 5, 5pm  | Avg freq: 44.00
+// C libdxl 3.8.1 on 3004 NUC12 @ Mar 5, 5pm  | Avg freq: 43.90 | Avg CPU: 10% on 1 CPU
+// C libdxl 3.8.1 on 3004 NUC12 @ Mar 5, 5pm  | Avg freq: 44.01 | Avg CPU: 5% on 1 CPU
+
+// C libdxl 3.8.2 on 2046 NUC12 @ Mar 18, 5pm | Avg freq: 44.29 | Avg CPU: 16.1%
+// C libdxl 3.8.2 on 2046 NUC12 @ Mar 18, 5pm | Avg freq: 44.35 | Avg CPU: 15.4%

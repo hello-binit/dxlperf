@@ -11,6 +11,8 @@
 
 #include <iostream>
 #include <chrono>
+#include <sys/resource.h>  // for getrusage()
+#include <sys/time.h>      // for struct rusage's timeval
 #include "dynamixel_sdk.h"
 
 // Protocol version
@@ -74,6 +76,11 @@ double ticks_to_world_rad_per_sec(int32_t ticks, double polarity, double gear_ra
 
 
 int main() {
+    // 0. Profile CPU usage
+    struct rusage usage_start;
+    getrusage(RUSAGE_SELF, &usage_start);
+    auto real_start = std::chrono::steady_clock::now();
+
     // 1. Init four servos
     dynamixel::PortHandler *portHandler = dynamixel::PortHandler::getPortHandler(DEVICENAME);
     dynamixel::PacketHandler *packetHandler = dynamixel::PacketHandler::getPacketHandler(PROTOCOL_VERSION);
@@ -292,8 +299,31 @@ int main() {
     double fps = 1.0 / dt;
     printf("\nAvg freq: %.2f\n", fps);
 
-    // 4. Shutdown
+    // 4. Close port
     portHandler->closePort();
+
+    // 5. Calculate CPU usage
+    struct rusage usage_end;
+    getrusage(RUSAGE_SELF, &usage_end);
+    auto real_end = std::chrono::steady_clock::now();
+
+    // CPU time (user + sys)
+    double user_start = usage_start.ru_utime.tv_sec + (usage_start.ru_utime.tv_usec / 1e6);
+    double user_end_t = usage_end.ru_utime.tv_sec   + (usage_end.ru_utime.tv_usec / 1e6);
+
+    double sys_start  = usage_start.ru_stime.tv_sec + (usage_start.ru_stime.tv_usec / 1e6);
+    double sys_end_t  = usage_end.ru_stime.tv_sec   + (usage_end.ru_stime.tv_usec / 1e6);
+
+    double total_cpu_time = (user_end_t - user_start) + (sys_end_t - sys_start);
+
+    // Real/wall time
+    std::chrono::duration<double> real_elapsed = real_end - real_start;
+    double real_time = real_elapsed.count();
+
+    // CPU usage % (relative to one CPU core)
+    double cpu_usage_percent = (total_cpu_time / real_time) * 100.0;
+    printf("\nAvg CPU: %.1f\n", cpu_usage_percent);
+
     return 0;
 }
 
@@ -303,3 +333,6 @@ int main() {
 
 // C++ libdxl 3.8.1 w/usb_latency_timer=0ms on 3004 NUC @ Mar 5, 9pm  | Avg freq: 67.51 | Avg CPU: 27% on 1 CPU
 // C++ libdxl 3.8.1 w/usb_latency_timer=0ms on 3004 NUC @ Mar 5, 9pm  | Avg freq: 67.56
+
+// C++ libdxl 3.8.2 on 2046 NUC12 @ Mar 18, 6pm | Avg freq: 59.34 | Avg CPU: 14.7%
+// C++ libdxl 3.8.2 on 2046 NUC12 @ Mar 18, 6pm | Avg freq: 59.34 | Avg CPU: 15.1%

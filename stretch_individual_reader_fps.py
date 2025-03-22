@@ -1,4 +1,11 @@
 import time
+import psutil
+
+# Profile CPU usage
+process = psutil.Process()
+start_proc_times = process.cpu_times()
+start_wall_time = time.time()
+
 import numpy as np
 import stretch_body.dynamixel_hello_XL430
 
@@ -34,14 +41,37 @@ print(f'Avg freq: {freq_mean:.2f}')
 
 [j.stop() for j in [yaw, pitch, roll, gripper]]
 
-# dynamixel-sdk 3.7.31 on 3004 NUC @ Feb 19, 11:30am | Avg freq: 25.17
-# dynamixel-sdk 3.7.31 on 3004 NUC @ Feb 19, 11:30am | Avg freq: 25.57
-# dynamixel-sdk 3.8.1  on 3004 NUC @ Feb 19, 12pm    | Avg freq: 25.08
-# dynamixel-sdk 3.8.1  on 3004 NUC @ Feb 19, 12pm    | Avg freq: 25.52
-# dynamixel-sdk 3.8.1  on 3004 NUC @ Feb 19, 9pm     | Avg freq: 26.44
-# dynamixel-sdk 3.8.1  on 3004 NUC @ Feb 19, 10pm    | Avg freq: 26.74
-# dynamixel-sdk 3.8.1  on 3004 NUC @ Feb 24, 8am     | Avg freq: 26.98
-# dynamixel-sdk 3.8.1  on 3004 NUC @ Mar  5, 3pm     | Avg freq: 24.91 | Avg CPU: 90% on 1 CPU
-# dynamixel-sdk 3.8.1  on 3004 NUC @ Mar  5, 3pm     | Avg freq: 26.01 | Avg CPU: 90% on 1 CPU
+# Calculate CPU usage
+end_proc_times = process.cpu_times()
+end_wall_time = time.time()
 
-# dynamixel-sdk 3.8.1 w/usb_latency_timer=0ms on 3004 NUC @ Feb 24, 10:30am | Avg freq: 30.52 | Avg CPU: 60% across 2 CPUs
+# User + System CPU time used by this process over entire run
+used_cpu_time = (
+    (end_proc_times.user - start_proc_times.user) +
+    (end_proc_times.system - start_proc_times.system)
+)
+
+# Total elapsed (wall-clock) time
+elapsed_time = end_wall_time - start_wall_time
+
+# if fully occupies one core on a 4-core machine, it would read ~100%, but if it occupies all 4 cores, it would read ~400%.
+cpu_usage_percent = used_cpu_time / elapsed_time * 100
+print(f'Avg CPU: {cpu_usage_percent:.1f}%')
+
+# dynamixel-sdk 3.7.31 on 3004 NUC12 @ Feb 19, 11:30am | Avg freq: 25.17
+# dynamixel-sdk 3.7.31 on 3004 NUC12 @ Feb 19, 11:30am | Avg freq: 25.57
+# dynamixel-sdk 3.8.1  on 3004 NUC12 @ Feb 19, 12pm    | Avg freq: 25.08
+# dynamixel-sdk 3.8.1  on 3004 NUC12 @ Feb 19, 12pm    | Avg freq: 25.52
+# dynamixel-sdk 3.8.1  on 3004 NUC12 @ Feb 19, 9pm     | Avg freq: 26.44
+# dynamixel-sdk 3.8.1  on 3004 NUC12 @ Feb 19, 10pm    | Avg freq: 26.74
+# dynamixel-sdk 3.8.1  on 3004 NUC12 @ Feb 24, 8am     | Avg freq: 26.98
+# dynamixel-sdk 3.8.1  on 3004 NUC12 @ Mar  5, 3pm     | Avg freq: 24.91 | Avg CPU: 90% on 1 CPU
+# dynamixel-sdk 3.8.1  on 3004 NUC12 @ Mar  5, 3pm     | Avg freq: 26.01 | Avg CPU: 90% on 1 CPU
+
+# dynamixel-sdk 3.8.1 w/usb_latency_timer=0ms on 3004 NUC12 @ Feb 24, 10:30am | Avg freq: 30.52 | Avg CPU: 60% across 2 CPUs
+
+
+# dynamixel-sdk 3.7.31 on 2046 NUC12 @ Mar 18, 4pm | Avg freq: 26.35 | Avg CPU: 58% on 1 CPU
+# dynamixel-sdk 3.7.31 on 2046 NUC12 @ Mar 18, 4pm | Avg freq: 26.20 | Avg CPU: 20% on 3 CPUs
+# dynamixel-sdk 3.7.31 on 2046 NUC12 @ Mar 18, 5pm | Avg freq: 26.54 | Avg CPU: 96.1%
+# dynamixel-sdk 3.7.31 on 2046 NUC12 @ Mar 18, 5pm | Avg freq: 26.27 | Avg CPU: 95.5%
