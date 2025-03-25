@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
 
 import time
+
 import numpy as np
 import stretch_body_ii.core.feetech_SM_hello 
 import stretch_body_ii.core.feetech.port_handler as prh
 prh.LATENCY_TIMER = 10
+
+
+# Profile CPU usage
+import psutil
+process = psutil.Process()
+start_proc_times = process.cpu_times()
+start_wall_time = time.time()
 
 yaw =  stretch_body_ii.core.feetech_SM_hello.FeetechSMHello('wrist_yaw')
 pitch = stretch_body_ii.core.feetech_SM_hello.FeetechSMHello('wrist_pitch')
@@ -16,6 +24,8 @@ assert all([j.startup(threaded=False) for j in [yaw, pitch, roll, gripper]])
 throwaway_cnt = 5
 actual_dt_history = []
 min_rate=1000
+
+
 for _ in range(1000+throwaway_cnt):
     t0 = time.time()
     [j.pull_status() for j in [yaw, pitch, roll, gripper]]
@@ -37,6 +47,24 @@ print(f'Avg freq: {freq_mean:.2f}')
 print()
 print(f'Min freq: {min_rate:.2f}')
 [j.stop() for j in [yaw, pitch, roll, gripper]]
+
+
+# Calculate CPU usage
+end_proc_times = process.cpu_times()
+end_wall_time = time.time()
+
+# User + System CPU time used by this process over entire run
+used_cpu_time = (
+    (end_proc_times.user - start_proc_times.user) +
+    (end_proc_times.system - start_proc_times.system)
+)
+
+# Total elapsed (wall-clock) time
+elapsed_time = end_wall_time - start_wall_time
+
+# if fully occupies one core on a 4-core machine, it would read ~100%, but if it occupies all 4 cores, it would read ~400%.
+cpu_usage_percent = used_cpu_time / elapsed_time * 100
+print(f'Avg CPU: {cpu_usage_percent:.1f}%')
 
 #Avg freq: 83.62
 #Avg freq: 83.62
