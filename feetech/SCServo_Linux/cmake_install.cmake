@@ -1,4 +1,4 @@
-# Install script for directory: /home/hello-robot/repos/dxlperf/SCServo_Linux
+# Install script for directory: /home/hello-robot/repos/dxlperf/feetech/SCServo_Linux
 
 # Set the install prefix
 if(NOT DEFINED CMAKE_INSTALL_PREFIX)
@@ -50,5 +50,5 @@ endif()
 
 string(REPLACE ";" "\n" CMAKE_INSTALL_MANIFEST_CONTENT
        "${CMAKE_INSTALL_MANIFEST_FILES}")
-file(WRITE "/home/hello-robot/repos/dxlperf/SCServo_Linux/${CMAKE_INSTALL_MANIFEST}"
+file(WRITE "/home/hello-robot/repos/dxlperf/feetech/SCServo_Linux/${CMAKE_INSTALL_MANIFEST}"
      "${CMAKE_INSTALL_MANIFEST_CONTENT}")
