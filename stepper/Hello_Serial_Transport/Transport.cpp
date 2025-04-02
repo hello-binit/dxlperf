@@ -1,3 +1,8 @@
+#include <cstdint>
+#include <cstring>
+#include <iostream>
+ 
+
 #include "Transport.h"
 #include "COBS.h"
 #include "Crc16.h"
@@ -173,7 +178,7 @@ void stepTransport_V1(void (*rpc_callback)(),uint8_t nbytes_rx)
     //////////////////////// PUSH ///////////////////////////////////
       case RPC_V1_PUSH_FRAME_FIRST_ONLY:
           ready_rpc_state();
-          memcpy(rpc_in,frame_in+1,nbytes_rx-1);
+          std::memcpy(rpc_in,frame_in+1,nbytes_rx-1);
           num_byte_rpc_in=nbytes_rx-1;
           (*rpc_callback)();
           frame_out[0]=RPC_V1_PUSH_ACK;
