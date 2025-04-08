@@ -1,314 +1,248 @@
-#include <cstdint>
-#include <cstring>
-#include <iostream>
- 
 
 #include "Transport.h"
-#include "COBS.h"
-#include "Crc16.h"
-/////////////////////////////////////////////////////////////////////////////////
-/* Hello Robot RPC Serial Transport protocol
 
-  An RPC exchange happens as:
-
-  Host: Send array of bytes [RPC_ID1 data1...]
-  Arduino: Reply with [RPC_ID2 data2...]
-  Data can be up to 1024 bytes
-
-  Each RPC Send & RPC Reply is further decomposed into a series of smaller data Blocks so that the
-  serial buffers don't choke.
-
-  Each Block is packed into a Frame which includes Cobbs Encoding/CRC handling so that data integrity is gaurunteed.
-
-  RPC/Block/Frame sizes and timings are hardcoded/tuned for our particular application requirements
-
-  So generally:
-  1. Host: RPC Send -> Blocks -> Frames -> Serial
-  2. Arduino: process the sent RPC request
-  3. Arduino: RPC Reply -> Blocks ->Frames -> SerialUSB
-  4. Host: Process the RPC reply
-
-
-  Starting with v0.4.0 of Stretch firmware the V1 transport protocol is supported
-  The code below allows for both V0 and V1 to exist at the same time in order to provide backward compatibility
- */
-//////////////////////////////  V1 Defines ///////////////////////////////////////////////////
-
-#define RPC_V1_PUSH_FRAME_FIRST_MORE 201
-#define RPC_V1_PUSH_FRAME_FIRST_ONLY 202
-#define RPC_V1_PUSH_FRAME_MORE 203
-#define RPC_V1_PUSH_FRAME_LAST  204
-#define RPC_V1_PUSH_ACK  205
-#define RPC_V1_PULL_FRAME_FIRST 206
-#define RPC_V1_PULL_FRAME_MORE 207
-#define RPC_V1_PULL_FRAME_ACK_MORE  208
-#define RPC_V1_PULL_FRAME_ACK_LAST 209
-#define RPC_V1_FRAME_DATA_MAX_BYTES  58 //63 - 2 (CRC) - 1 (Cobbs Header) - 1 (FRAME CMD) - 1 (Packet Marker)
-
-#define COBBS_FRAME_SIZE_V1 63 //Was seeing issues when transmitting 64 bytes so limiting to 63. Issue resolved.
-bool in_transaction=false;
-
-
-//////////////////////////////  V0 Defines ///////////////////////////////////////////////////
-#define RPC_V0_START_NEW_RPC 100
-#define RPC_V0_ACK_NEW_RPC 101
-#define RPC_V0_SEND_BLOCK_MORE  102
-#define RPC_V0_ACK_SEND_BLOCK_MORE  103
-#define RPC_V0_SEND_BLOCK_LAST  104
-#define RPC_V0_ACK_SEND_BLOCK_LAST  105
-#define RPC_V0_GET_BLOCK  106
-#define RPC_V0_ACK_GET_BLOCK_MORE  107
-#define RPC_V0_ACK_GET_BLOCK_LAST  108
-#define RPC_V0_BLOCK_SIZE 32
-
-#define COBBS_FRAME_SIZE_V0 64
-
-//////////////////////////////  Shared Defines ///////////////////////////////////////////////////
-#define RPC_DATA_MAX_BYTES  1024
-#define RPC_MAX_FRAME_SIZE 64 //Arduino and Linux USB Uart has a 64 byte buffer. When frame is >64 have seen issues.
-
-uint8_t rx_buffer[RPC_MAX_FRAME_SIZE];
-uint8_t tx_buffer[RPC_MAX_FRAME_SIZE];
-uint8_t frame_in[RPC_MAX_FRAME_SIZE];
-uint8_t frame_out[RPC_MAX_FRAME_SIZE];
-uint8_t rpc_in[RPC_DATA_MAX_BYTES+1]; //Can transmit up to 1024 bytes + 1 byte for RPC ID
-uint8_t rpc_out[RPC_DATA_MAX_BYTES+1];
-uint16_t num_byte_rpc_out=0;
-uint16_t num_byte_rpc_in=0;
-uint16_t byte_in_cnt=0;
-uint16_t byte_out_cnt=0;
-/////////////////////////////////// COBS Framing Shared //////////////////////////////////////////////////////////////
 /*
-Based on COBS.h from
-https://github.com/bakercp/PacketSerial
-MIT License
-Copyright (c) 2017 Christopher Baker https://christopherbaker.net
+
+Loop protocol is:
+
+There are two SHM channels
+* Streaming: Do streaming RPC requests. For each cycle, reply with a pull_status from the uC
+* One-Shot: Do a single RPC request
+
+ONE-SHOT
+1. RPC Data is push into SHM from Python side. 
+2. Loop is signaled that data is ready
+3. Data is COBBS encode 
+
+The  packet is:
+
+Data can be up to X bytes.
+
+Data is manually packed / unpacked into dictionaries (Python) and C-structs (Arduino).
+Care should be taken that the pack/unpack size and types are consistent between the two.
+This is not automated.
 */
 
-#define COBBS_PACKET_MARKER 0
-COBS cobs;
-Crc16 crc;
-bool rx_buffer_overflow = false;
-int  rx_buffer_idx=0;
-#define FRAMING_TIMEOUT 100000 //0.1s or 10hz minimum rate to send a block of 32bytes
-
-/////////////////////////////////////////////////////////////////////////////////
-
-bool ready_rpc_state()
+bool Transport::startup(const char* serialPort)
 {
-    num_byte_rpc_in=0;
-    byte_in_cnt=0;
-    num_byte_rpc_out=0;
-    byte_out_cnt=0;
-    in_transaction=false;
+    //hardcode baudrate for now as using USB->serial
+    valid_port= begin(B115200,serialPort);
+    return valid_port;
 }
 
-void setupTransport() {
-    ready_rpc_state();
+bool Transport::sendFramedData(uint8_t * frame_buf, size_t nb_frame)
+{
+    /*
+    Encode a frame and transmit it
+    frame_buf: un-encoded frame to transmit, size >= RPC_MAX_FRAME_SIZE
+    nb_frame: number of bytes in frame_buf
+    */
+    
+    crc.clearCrc();
+    uint16_t value = crc.Modbus(frame_buf,0,nb_frame);
+    frame_buf[nb_frame++]=(value>>8)&0xff;
+    frame_buf[nb_frame++]= value&0xff;
+
+    uint8_t encoded_buf[RPC_MAX_FRAME_SIZE]; 
+    int nb = cobs.encode(frame_buf,nb_frame,encoded_buf);
+    encoded_buf[nb++]=COBBS_PACKET_MARKER;
+    writeSCS(encoded_buf, nb);
+    wFlushSCS();
 }
 
-
-//Read a frame for serial and Cobbs decode it
-//Return 1 if got a valid frame
-//Otherwise this will clear out any bytes in the RX buffer until FRAMING_TIMEOUT
-bool receive_frame(uint8_t * buf, uint8_t & n, int cobbs_frame_size)
+bool Transport::receiveFramedData(uint8_t * frame_buf, size_t & nb_frame)
 {
-    unsigned long t_start =micros();
-    uint8_t byte_in;
-    while((micros()-t_start)<FRAMING_TIMEOUT) //data may be sparse, keep polling until first byte arrives, then get whole packet
+    /*
+    Recieve a frame back and decode:
+        frame_buf: buf to decode frame into
+        nb_frame: number of bytes in resultant frame_buf
+    Return true if coherent frame recieved 
+    */
+
+    int fs_sel;
+    fd_set fs_read;
+	int rvLen = 0;
+    struct timeval time;
+    FD_ZERO(&fs_read);
+    FD_SET(fd,&fs_read);
+
+    time.tv_sec = 0;
+    time.tv_usec = IOTimeOut*1000;
+
+    nb_frame=0;
+    int nrx=0;
+    int nf=0;
+    uint8_t tmp_buf[RPC_MAX_FRAME_SIZE]; 
+    uint8_t encoded_buf[RPC_MAX_FRAME_SIZE];
+    crc_ok=true;
+	while(1)
     {
-		if(SerialUSB.available()>0)
-		{
-            byte_in = SerialUSB.read();
-            t_start =micros();  //Restart the timer otherwise can have race condition as prior start point may be close to expiring
-
-            if (byte_in == COBBS_PACKET_MARKER)
+		fs_sel = select(fd+1, &fs_read, NULL, NULL, &time);
+		if(fs_sel)
+        {
+			nrx= read(fd, tmp_buf, RPC_MAX_FRAME_SIZE);
+            if (nrx>RPC_MAX_FRAME_SIZE)
             {
-                n = cobs.decode(rx_buffer, rx_buffer_idx, buf);
-                crc.clearCrc();
-                uint16_t crc1 = crc.Modbus(buf,0,n-2);
-                uint16_t crc2 = (buf[n-2]<<8)|buf[n-1];
-                n=n-2;
-                rx_buffer_idx = 0;
-                rx_buffer_overflow = false;
-                return (crc1==crc2);
+                printf("receiveFramedData: Bad NRX: %d \n", nrx);
+                return false;
             }
-            else
+            for (int nn=0;nn<nrx;nn++)
             {
-                if ((rx_buffer_idx + 1) < cobbs_frame_size)
-                {
-                    rx_buffer[rx_buffer_idx++] = byte_in;
+                if (tmp_buf[nn]==COBBS_PACKET_MARKER) //End of Frame, process it
+                {    
+                    nb_frame=cobs.decode(encoded_buf,nf,frame_buf);
+                    crc.clearCrc();
+                    uint16_t crc1 = (frame_buf[nb_frame-2]<<8)+frame_buf[nb_frame-1];
+                    uint16_t crc2 = crc.Modbus(frame_buf,0,nb_frame-2);
+                    if (crc1!=crc2)
+                    {
+                        crc_ok=false;
+                        printf("receiveFramedData: Bad CRC: %d | %d\n", crc1,crc2);
+                        return false;
+                    }
+                    nb_frame=nb_frame-2; //drop CRC
+                    return true;
                 }
                 else
                 {
-                    // The buffer will be in an overflowed state if we write
-                    // so set a buffer overflowed flag.
-                    rx_buffer_overflow = true;
-                    //ready_rpc_state();
+                    encoded_buf[nf++]=tmp_buf[nn];
+                    if (nf>RPC_MAX_FRAME_SIZE)
+                    {
+                        printf("receiveFramedData: Failed to get COBBS_PACKET_MARKER\n");
+                        return false;
+                    }
                 }
             }
         }
     }
-    return 0;
-}
-
-void send_frame(uint8_t * buf, uint8_t n)
-{
-        crc.clearCrc();
-        uint16_t value = crc.Modbus(buf,0,n);
-        buf[n++]=(value>>8)&0xff;
-        buf[n++]= value&0xff;
-        int nb = cobs.encode(buf,n,tx_buffer);
-        tx_buffer[nb++]=COBBS_PACKET_MARKER;
-        SerialUSB.write(tx_buffer, nb);
 }
 
 
-
-/////////////////////////////////////////////////////////////////////////////////
-
-
-void stepTransport_V1(void (*rpc_callback)(),uint8_t nbytes_rx)
+bool Transport::handle_push_ack_v1(bool crc, size_t nr, int ack_code)
 {
-
-  uint16_t nbo;
-
-    switch (frame_in[0])
+/*
+Utility function for code readability
+*/
+/*if self.dbg_on:
+    if nr:
+        self.dbg_buf = self.dbg_buf + 'Framer rcvd on RPC_V1_PUSH_ACK CRC: ' + str(crc) + ' NR: ' + str(nr) + \
+                       ' B0: ' + str(ack_code) + ' Expected B0: ' + str(RPC_V1_PUSH_ACK) + ':' + self.port_name
+    else:
+        self.dbg_buf = self.dbg_buf + 'Framer rcvd 0 bytes on RPC_PUSH_ACK'*/
+    if (crc != 1)
     {
-    //////////////////////// PUSH ///////////////////////////////////
-      case RPC_V1_PUSH_FRAME_FIRST_ONLY:
-          ready_rpc_state();
-          std::memcpy(rpc_in,frame_in+1,nbytes_rx-1);
-          num_byte_rpc_in=nbytes_rx-1;
-          (*rpc_callback)();
-          frame_out[0]=RPC_V1_PUSH_ACK;
-          memcpy(frame_out+1,rpc_out,num_byte_rpc_out);
-          send_frame(frame_out,num_byte_rpc_out+1);
-          ready_rpc_state();
-          break;
-      case RPC_V1_PUSH_FRAME_FIRST_MORE: //first of multi frame
-          ready_rpc_state();
-          in_transaction=true;
-          memcpy(rpc_in,frame_in+1,nbytes_rx-1);
-          byte_in_cnt=byte_in_cnt+nbytes_rx-1;
-          frame_out[0]=RPC_V1_PUSH_ACK;
-          send_frame(frame_out,1);
-          break;
-      case RPC_V1_PUSH_FRAME_MORE: //first of multi frame
-          if (in_transaction)
-          {
-              memcpy(rpc_in+byte_in_cnt,frame_in+1,nbytes_rx-1);
-              byte_in_cnt=byte_in_cnt+nbytes_rx-1;
-              frame_out[0]=RPC_V1_PUSH_ACK;
-              send_frame(frame_out,1);
-          }
-          else
-            ready_rpc_state();
-          break;
-      case RPC_V1_PUSH_FRAME_LAST: //Last frame of multi frame, or first and only frame
-          if (in_transaction)
-          {
-              memcpy(rpc_in+byte_in_cnt,frame_in+1,nbytes_rx-1);
-              num_byte_rpc_in=nbytes_rx-1;
-              (*rpc_callback)();
-              frame_out[0]=RPC_V1_PUSH_ACK;
-              memcpy(frame_out+1,rpc_out,num_byte_rpc_out);
-              send_frame(frame_out,num_byte_rpc_out+1);
-              ready_rpc_state();
-          }
-          else
-            ready_rpc_state();
-          break;
-
-    //////////////////////// PULL ///////////////////////////////////
-      case RPC_V1_PULL_FRAME_FIRST:
-          ready_rpc_state();
-          num_byte_rpc_in=nbytes_rx-1;
-          memcpy(rpc_in,frame_in+1,num_byte_rpc_in); //Get single frame RPC request for a pull and process it
-          (*rpc_callback)();
-          in_transaction=true;
-          //fall through
-      case RPC_V1_PULL_FRAME_MORE:
-            if (in_transaction)
-            {
-                nbo = min(RPC_V1_FRAME_DATA_MAX_BYTES,num_byte_rpc_out-byte_out_cnt);
-                if (num_byte_rpc_out-byte_out_cnt<=RPC_V1_FRAME_DATA_MAX_BYTES) //Last frame?
-                {
-                    frame_out[0]=RPC_V1_PULL_FRAME_ACK_LAST;
-                    memcpy(frame_out+1, rpc_out+byte_out_cnt,nbo);
-                    send_frame(frame_out,nbo+1);
-                    ready_rpc_state();
-                    break;
-                }
-              //Multi-frame pull
-               frame_out[0]=RPC_V1_PULL_FRAME_ACK_MORE;
-               memcpy(frame_out+1, rpc_out+byte_out_cnt,RPC_V1_FRAME_DATA_MAX_BYTES);
-               send_frame(frame_out,RPC_V1_FRAME_DATA_MAX_BYTES+1);
-               byte_out_cnt=byte_out_cnt+RPC_V1_FRAME_DATA_MAX_BYTES;
-            }
-            else
-                ready_rpc_state();
-          break;
-    };
-}
-
-
-///////////////////////////// V0 ////////////////////////////////////////////////////
-
-
-void stepTransport_V0(void (*rpc_callback)(),uint8_t nbytes_rx)
-{
-  uint16_t nbo;
-    switch (frame_in[0])
-    {
-      case RPC_V0_START_NEW_RPC:
-          frame_out[0]=RPC_V0_ACK_NEW_RPC;
-          send_frame(frame_out,1);
-          num_byte_rpc_out=0;
-          num_byte_rpc_in=0;
-          byte_in_cnt=0;
-          byte_out_cnt=0;
-        break;
-      case RPC_V0_SEND_BLOCK_MORE:
-          memcpy(rpc_in+byte_in_cnt,frame_in+1,nbytes_rx-1);
-          byte_in_cnt=byte_in_cnt+nbytes_rx-1;
-          frame_out[0]=RPC_V0_ACK_SEND_BLOCK_MORE;
-          send_frame(frame_out,1);
-          break;
-      case RPC_V0_SEND_BLOCK_LAST:
-          memcpy(rpc_in+byte_in_cnt,frame_in+1,nbytes_rx-1);
-          byte_in_cnt=byte_in_cnt+nbytes_rx-1;
-          frame_out[0]=RPC_V0_ACK_SEND_BLOCK_LAST;
-          send_frame(frame_out,1);
-          num_byte_rpc_in=byte_in_cnt;
-          (*rpc_callback)(); //Received a request, process it and build reply
-          break;
-      case RPC_V0_GET_BLOCK:
-          nbo=min(RPC_V0_BLOCK_SIZE,num_byte_rpc_out-byte_out_cnt);
-          if (byte_out_cnt+nbo==num_byte_rpc_out) //Is last block?
-            frame_out[0]=RPC_V0_ACK_GET_BLOCK_LAST;
-          else
-            frame_out[0]=RPC_V0_ACK_GET_BLOCK_MORE;
-          memcpy(frame_out+1,rpc_out+byte_out_cnt,nbo);
-          send_frame(frame_out,nbo+1);
-          byte_out_cnt=byte_out_cnt+nbo;
-          break;
-    };
-}
-
-bool stepTransport(void (*rpc_callback)())
-{
-  uint8_t nbytes_rx;
-
-  if (receive_frame(frame_in, nbytes_rx, COBBS_FRAME_SIZE_V1))
-  {
-    if(frame_in[0]>=RPC_V1_PUSH_FRAME_FIRST_MORE && frame_in[0]<=RPC_V1_PULL_FRAME_ACK_LAST)
-        stepTransport_V1(rpc_callback,nbytes_rx);
-    else if(frame_in[0]>=RPC_V0_START_NEW_RPC && frame_in[0]<=RPC_V0_ACK_GET_BLOCK_LAST)
-        stepTransport_V0(rpc_callback,nbytes_rx);
-    else
+        printf("Transport CRC Error on RPC_V1_PUSH_ACK\n");// {0} {1} {2}'.format(crc, nr, ack_code))
         return false;
+    }
+    
+    if (ack_code != RPC_V1_PUSH_ACK)
+    {
+        printf("Transport RX Error on RPC_V1_PUSH_ACK\n");// {0} {1} {2}'.format(crc, nr, ack_code))
+        return false;
+    }
     return true;
-  }
-  return false;
 }
+
+
+bool Transport::doPushTransaction(uint8_t * rpc_data, size_t nb_rpc_data,
+    void (*rpc_callback)(uint8_t * rpc_reply, size_t nb_rpc_reply))
+{
+    /*
+    Parameters
+    ----------
+    rpc_data: Buffer of RPC data to transmit to uC
+    nb_rpc_data: number of bytes in buffer
+    rpc_callback: to be called upon success
+    Returns: True/False if successful
+    -------
+    Push command data
+    Take the rpc_data, break into 64 byte encoded frames, and write to serial.
+    Recieve back acks for each frame sent
+
+    RPC data looks like:
+    rpc_data = [RPC_ID D0, D1,...] (Len 1024 max)
+
+    The rpc_data is then grouped into one or more 59 byte frames.
+
+    For rpc_data<=59 bytes, an RPC send is straigthforward:
+
+    push_frame_0 = [RPC_PUSH_FRAME_LAST, D0,...DN, CRC1 CRC2] (len 62 max, N<=58)
+
+    If the size of data sent is over 59 bytes, then multiple frames are used. If for example, 150 bytes are sent:
+
+    frame_0 = [RPC_PUSH_FRAME_MORE, , D0,...D58, CRC1 CRC2] (len 62 max)
+    frame_1 = [RPC_PUSH_FRAME_MORE, D59,...D117, CRC1 CRC2] (len 62 max)
+    frame_2 = [RPC_PUSH_FRAME_LAST, D118,...D149, CRC1 CRC2] (len 62 max)
+
+    Before transmission each frame is first Cobbs encoded as:
+
+    [ OverheadByte 62_bytes_max_encoded DelimiterByte] (Len 64 max)
+
+    A push transaction does not return status data back. It returns a RPC_PUSH_x_ACK to acknowledge that a frame was
+    succesfully recieved. It also returns an RPC_ID_ACK for the callback to verify that the correct RPC call was completed.
+
+    reply_frame_0 = [RPC_PUSH_ACK RPC_ID_ACK CRC1 CRC2]
+
+    Finally, reply data is decoded and passed to the rpc_callback
+        */
+
+    if (!valid_port)
+        return false;
+    
+    if (nb_rpc_data>RPC_DATA_MAX_BYTES)
+    {
+        printf("doPushTransaction: RPC data size of %d exceeds max of %d\n",
+            nb_rpc_data,RPC_DATA_MAX_BYTES);
+        return false;
+    }
+    transactions++;
+
+    //This will block until  RPC has been completed
+    
+    //TODO: Bring back exception handling
+        
+
+    int n_frames = std::ceil(nb_rpc_data / RPC_V1_FRAME_DATA_MAX_BYTES);
+    int widx = 0;
+    uint8_t frame_buf_tx[RPC_MAX_FRAME_SIZE];
+    uint8_t frame_buf_rx[RPC_MAX_FRAME_SIZE];
+    size_t nb_frame_rx;
+
+    for (int fid=0;fid<n_frames;fid++)
+    {
+        std::memset(frame_buf_tx,0,RPC_MAX_FRAME_SIZE); 
+        //Build the Nth frame and transmit
+        if (fid == 0 && n_frames == 1)
+        frame_buf_tx[0] = RPC_V1_PUSH_FRAME_FIRST_ONLY;
+        else if(fid == 0 && n_frames > 1)
+        frame_buf_tx[0] = RPC_V1_PUSH_FRAME_FIRST_MORE;
+        else if(fid == n_frames - 1)
+        frame_buf_tx[0] = RPC_V1_PUSH_FRAME_LAST;
+        else
+        frame_buf_tx[0] = RPC_V1_PUSH_FRAME_MORE;
+
+        int nb_frame = std::min(RPC_V1_FRAME_DATA_MAX_BYTES, (int)nb_rpc_data - widx);
+        memcpy(frame_buf_tx+1, rpc_data+widx,nb_frame);
+        widx = widx + nb_frame;
+        sendFramedData(frame_buf_tx, nb_frame + 1);
+
+        //Get Ack back
+        if(receiveFramedData(frame_buf_rx, nb_frame_rx))
+        {
+            handle_push_ack_v1(crc_ok, nb_frame_rx,frame_buf_rx[0]);
+            if(fid == n_frames - 1) //Got last ack
+                (*rpc_callback)(frame_buf_rx+1, nb_frame_rx-1);
+        }
+    }
+    return true;
+return false;
+}
+
+
+
+
+
+
+
+
+

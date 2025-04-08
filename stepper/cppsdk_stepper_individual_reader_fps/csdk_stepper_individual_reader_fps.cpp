@@ -20,6 +20,25 @@ void signalHandler(int signum) {
     }
 }
 
+
+class SHM_Shuttle {
+    private:
+         bool shm_rx_ready=0;
+ 
+    public:
+         inline SHM_Shuttle()
+         {
+            shm_rx_ready=0;   
+         }
+
+        };
+        void step()
+        {
+            if (shm_rx_ready){
+                
+            }
+        }
+
 int main(int argc, char **argv)
 {
 

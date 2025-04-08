@@ -33,7 +33,7 @@ bool in_transaction=false;
 //RPC_DATA_MAX_BYTES_SAMD51 = 8194 #SAMD51 needs 8KB of space for 2048 floats + rpc ID
 #define COBBS_PACKET_MARKER 0
 
-class Transport : public SCSerial{
+class TransportSHM : public SCSerial{
    public:
       bool startup(const char* serialPort);
       bool doPushTransaction(uint8_t * rpc_out, size_t nb_rpc_out, 
