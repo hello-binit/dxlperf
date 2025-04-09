@@ -13,7 +13,7 @@ SCSerial::SCSerial()
 	fd = -1;
 	txBufLen = 0;
 }
-
+/*
 SCSerial::SCSerial(u8 End):SCS(End)
 {
 	IOTimeOut = 100;
@@ -26,7 +26,7 @@ SCSerial::SCSerial(u8 End, u8 Level):SCS(End, Level)
 	IOTimeOut = 100;
 	fd = -1;
 	txBufLen = 0;
-}
+}*/
 
 bool SCSerial::begin(int baudRate, const char* serialPort)
 {
@@ -49,7 +49,7 @@ bool SCSerial::begin(int baudRate, const char* serialPort)
     cfsetispeed(&curopt, CR_BAUDRATE);
     cfsetospeed(&curopt, CR_BAUDRATE);
 
-	printf("serial speed %d\n", baudRate);
+	//printf("serial speed %d\n", baudRate);
     //Mostly 8N1
     curopt.c_cflag &= ~PARENB;
     curopt.c_cflag &= ~CSTOPB;

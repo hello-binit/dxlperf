@@ -1,6 +1,6 @@
 
 #include "Transport.h"
-
+#include <algorithm>
 /*
 
 Loop protocol is:
@@ -37,7 +37,8 @@ bool Transport::sendFramedData(uint8_t * frame_buf, size_t nb_frame)
     frame_buf: un-encoded frame to transmit, size >= RPC_MAX_FRAME_SIZE
     nb_frame: number of bytes in frame_buf
     */
-    
+    if (!valid_port)
+        return false;
     crc.clearCrc();
     uint16_t value = crc.Modbus(frame_buf,0,nb_frame);
     frame_buf[nb_frame++]=(value>>8)&0xff;
@@ -48,6 +49,7 @@ bool Transport::sendFramedData(uint8_t * frame_buf, size_t nb_frame)
     encoded_buf[nb++]=COBBS_PACKET_MARKER;
     writeSCS(encoded_buf, nb);
     wFlushSCS();
+    return true;
 }
 
 bool Transport::receiveFramedData(uint8_t * frame_buf, size_t & nb_frame)
@@ -61,7 +63,6 @@ bool Transport::receiveFramedData(uint8_t * frame_buf, size_t & nb_frame)
 
     int fs_sel;
     fd_set fs_read;
-	int rvLen = 0;
     struct timeval time;
     FD_ZERO(&fs_read);
     FD_SET(fd,&fs_read);
@@ -118,7 +119,7 @@ bool Transport::receiveFramedData(uint8_t * frame_buf, size_t & nb_frame)
 }
 
 
-bool Transport::handle_push_ack_v1(bool crc, size_t nr, int ack_code)
+bool Transport::handlePushAckV1(bool crc, size_t nr, int ack_code)
 {
 /*
 Utility function for code readability
@@ -143,8 +144,116 @@ Utility function for code readability
     return true;
 }
 
+bool Transport::handlePullAckV1(bool crc, size_t nr, int ack_code)
+{
+    //Utility function for code readability
+    /*if self.dbg_on:
+    if nr:
+        self.dbg_buf = self.dbg_buf + 'Framer rcvd on RPC_PULL_ACK CRC: ' + str(crc) + ' NR: ' + str(nr) + \
+                       ' B0: ' + str(ack_code) + ' Expected B0: ' + str(RPC_V1_PULL_FRAME_ACK_MORE) + \
+                       ' OR B0: ' + str(RPC_V1_PULL_FRAME_ACK_LAST) + ':' + self.port_name
+    else:
+        self.dbg_buf = self.dbg_buf + 'Framer rcvd 0 bytes on RPC_PULL_ACK'*/
+        if (crc != 1)
+        {
+            printf("Transport CRC Error on RPC_V1_PULL_ACK\n");// {0} {1} {2}'.format(crc, nr, ack_code))
+            return false;
+        }
+        
+        if (ack_code != RPC_V1_PULL_FRAME_ACK_MORE && ack_code != RPC_V1_PULL_FRAME_ACK_LAST)
+        {
+            printf("Transport RX Error on RPC_V1_PULL_ACK\n");// {0} {1} {2}'.format(crc, nr, ack_code))
+            return false;
+        }
+        return true;
+}
 
-bool Transport::doPushTransaction(uint8_t * rpc_data, size_t nb_rpc_data,
+
+bool Transport::doPullTransactionV1(uint8_t * rpc_data, size_t nb_rpc_data,
+    void (*rpc_callback)(uint8_t * rpc_reply, size_t nb_rpc_reply))
+{
+    /*
+            Parameters
+    ----------
+    rpc_data: Buffer of data to transmit in RPC
+    rpc_callback: Call back to process RPC reply data
+    Returns: True/False if successful
+    -------
+    This pulls status data from the device. The frame layout is analogous to do_push_transaction.
+    However, here we send down only a pull request (single frame with an RPC_ID).
+    We get back one or more frames of status data which is then decoded and passed to the callback.
+    */
+    if(!valid_port)
+        return false;
+    if (nb_rpc_data>RPC_DATA_MAX_BYTES)
+    {
+    printf("doPullTransactionV1: RPC data size of %d exceeds max of %d\n",
+        (int)nb_rpc_data,RPC_DATA_MAX_BYTES);
+    return false;
+    }
+
+    transactions++;
+    
+    //TODO: Bring back exception handling   
+    uint8_t rpc_reply[RPC_MAX_FRAME_SIZE*RPC_V1_MAX_FRAMES];  
+    size_t nb_rpc_reply=0;
+
+    size_t nb_frame_rx;
+    uint8_t frame_buf_tx[RPC_MAX_FRAME_SIZE];
+    uint8_t frame_buf_rx[RPC_MAX_FRAME_SIZE];
+
+
+    //First initiate a pull transaction
+    frame_buf_tx[0] = RPC_V1_PULL_FRAME_FIRST;
+    frame_buf_tx[1] = rpc_data[0];
+    int nb_frame = std::min((int)RPC_V1_FRAME_DATA_MAX_BYTES, (int)nb_rpc_data);
+    memcpy(frame_buf_tx+1,rpc_data,nb_frame);
+    sendFramedData(frame_buf_tx, nb_frame + 1);
+
+
+    //Next read out the N reply frames (up to 18, if no ACK_LAST, then error)
+    for (int i=0;i<RPC_V1_MAX_FRAMES;i++)
+    {
+        if (receiveFramedData(frame_buf_rx,nb_frame_rx))
+        {
+            if (handlePullAckV1(crc_ok, nb_frame_rx,frame_buf_rx[0]))
+            {
+                memcpy(rpc_reply+nb_rpc_reply,frame_buf_rx+1,nb_frame_rx-1); //copy decoded frame to reply (drop first byte of frame header)
+                nb_rpc_reply+=nb_frame_rx-1; //track size of reply
+
+                if (frame_buf_rx[0] == RPC_V1_PULL_FRAME_ACK_LAST)// No more frames to request
+                {
+                    (*rpc_callback)(rpc_reply, nb_rpc_reply);
+                    return true;
+                }
+                else if (frame_buf_rx[0] == RPC_V1_PULL_FRAME_ACK_MORE) // More frames to request
+                {
+                    frame_buf_tx[0] = RPC_V1_PULL_FRAME_MORE;
+                    sendFramedData(frame_buf_tx, 2);//nb_frame + 1);   
+                } 
+                else
+                {
+                    std::cout<<"Failed at doPullTransactionV1 frame_buf_rx[0]\n";
+                    return false;
+                }
+            }
+            else
+            {
+                std::cout<<"Failed at doPullTransactionV1 handlePullAckV1\n";
+                return false;
+            }
+        }
+        else
+        {
+            std::cout<<"Failed at doPullTransactionV1 receiveFramedData\n";
+            return false;
+        }
+    }
+    return true;
+}
+
+
+bool Transport::doPushTransactionV1(uint8_t * rpc_data, size_t nb_rpc_data,
     void (*rpc_callback)(uint8_t * rpc_reply, size_t nb_rpc_reply))
 {
     /*
@@ -188,11 +297,10 @@ bool Transport::doPushTransaction(uint8_t * rpc_data, size_t nb_rpc_data,
 
     if (!valid_port)
         return false;
-    
-    if (nb_rpc_data>RPC_DATA_MAX_BYTES)
+    if (nb_rpc_data-1>RPC_DATA_MAX_BYTES)
     {
         printf("doPushTransaction: RPC data size of %d exceeds max of %d\n",
-            nb_rpc_data,RPC_DATA_MAX_BYTES);
+            (int)nb_rpc_data,RPC_DATA_MAX_BYTES);
         return false;
     }
     transactions++;
@@ -202,7 +310,7 @@ bool Transport::doPushTransaction(uint8_t * rpc_data, size_t nb_rpc_data,
     //TODO: Bring back exception handling
         
 
-    int n_frames = std::ceil(nb_rpc_data / RPC_V1_FRAME_DATA_MAX_BYTES);
+    int n_frames = std::ceil((float)nb_rpc_data / (float)RPC_V1_FRAME_DATA_MAX_BYTES);
     int widx = 0;
     uint8_t frame_buf_tx[RPC_MAX_FRAME_SIZE];
     uint8_t frame_buf_rx[RPC_MAX_FRAME_SIZE];
@@ -229,13 +337,17 @@ bool Transport::doPushTransaction(uint8_t * rpc_data, size_t nb_rpc_data,
         //Get Ack back
         if(receiveFramedData(frame_buf_rx, nb_frame_rx))
         {
-            handle_push_ack_v1(crc_ok, nb_frame_rx,frame_buf_rx[0]);
+            handlePushAckV1(crc_ok, nb_frame_rx,frame_buf_rx[0]);
             if(fid == n_frames - 1) //Got last ack
                 (*rpc_callback)(frame_buf_rx+1, nb_frame_rx-1);
         }
+        else
+        {
+            std::cout<<"doPushTransaction: receiveFramedData failed\n";
+            return false;
+        }
     }
     return true;
-return false;
 }
 
 

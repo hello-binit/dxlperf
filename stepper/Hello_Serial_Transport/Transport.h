@@ -10,6 +10,8 @@
 #include "Crc16.h"
 #include "SCSerial.h"
 
+
+#define RPC_V1_MAX_FRAMES 18  // Required to support 1024 bytes
 #define RPC_V1_PUSH_FRAME_FIRST_MORE 201
 #define RPC_V1_PUSH_FRAME_FIRST_ONLY 202
 #define RPC_V1_PUSH_FRAME_MORE 203
@@ -22,8 +24,6 @@
 #define RPC_V1_FRAME_DATA_MAX_BYTES  58 //63 - 2 (CRC) - 1 (Cobbs Header) - 1 (FRAME CMD) - 1 (Packet Marker)
 
 #define COBBS_FRAME_SIZE_V1 63 //Was seeing issues when transmitting 64 bytes so limiting to 63. Issue resolved.
-bool in_transaction=false;
-
 
 //////////////////////////////  Shared Defines ///////////////////////////////////////////////////
 #define RPC_DATA_MAX_BYTES  1024
@@ -36,13 +36,21 @@ bool in_transaction=false;
 class Transport : public SCSerial{
    public:
       bool startup(const char* serialPort);
-      bool doPushTransaction(uint8_t * rpc_out, size_t nb_rpc_out, 
+      bool doPushTransactionV1(uint8_t * rpc_out, size_t nb_rpc_out, 
          void (*rpc_callback)(uint8_t * rpc_reply, size_t nb_rpc_reply));
-
+      bool doPullTransactionV1(uint8_t * rpc_out, size_t nb_rpc_out, 
+         void (*rpc_callback)(uint8_t * rpc_reply, size_t nb_rpc_reply));
+      inline Transport()
+      {
+         transactions=0;
+         valid_port=false;
+         crc_ok=false;
+      }
    private:
       bool sendFramedData(uint8_t * frame, size_t nb_frame);
       bool receiveFramedData(uint8_t * frame_buf, size_t & nb_frame);
-      bool handle_push_ack_v1(bool crc, size_t nr, int ack_code);
+      bool handlePushAckV1(bool crc, size_t nr, int ack_code);
+      bool handlePullAckV1(bool crc, size_t nr, int ack_code);
 
       int transactions;
       bool valid_port;
@@ -65,14 +73,8 @@ class Transport : public SCSerial{
          int num_byte_rpc_in=0;*/
         
 
-         inline TransportSHM()
-         {
-            transactions=0;
-            valid_port=false;
-            crc_ok=false;
-         }
+ 
 
-    public:
 
     };
 

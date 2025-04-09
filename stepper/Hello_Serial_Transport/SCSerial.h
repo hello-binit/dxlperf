@@ -8,7 +8,7 @@
 #ifndef _SCSERIAL_H
 #define _SCSERIAL_H
 
-#include "SCS.h"
+//#include "SCS.h"
 #include <stdio.h>
 #include <termios.h>
 #include <fcntl.h>
@@ -16,12 +16,12 @@
 #include <string.h>
 #include <sys/select.h>
 
-class SCSerial : public SCS
+class SCSerial //: public SCS
 {
 public:
 	SCSerial();
-	SCSerial(u8 End);
-	SCSerial(u8 End, u8 Level);
+	//SCSerial(u8 End);
+	//SCSerial(u8 End, u8 Level);
 
 public:
 	int writeSCS(unsigned char *nDat, int nLen);//输出nLen字节
